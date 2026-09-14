@@ -2,7 +2,30 @@ import json
 from typing import List
 from models.schemas import FinalEvaluation, Claim, Evidence, FactCheckResult, Rebuttal, Transcript
 from api.ollama_client import ask_ollama
+def build_speaker_summary(speaker, claims, evidence, fact_checks, rebuttals):
+    """
+    Gathers everything a given speaker said, with actual text content,
+    so the AI has real material to judge instead of just counts.
+    """
+    fact_checks_by_claim = {fc.claim_id: fc for fc in fact_checks}
+    speaker_claims = [c for c in claims if c.speaker == speaker]
 
+    summary = []
+    for c in speaker_claims:
+        claim_evidence = [e.evidence_text for e in evidence if e.claim_id == c.claim_id]
+        fact_check = fact_checks_by_claim.get(c.claim_id)
+        rebuttals_received = [
+            {"text": r.rebuttal_text, "type": r.type, "survived": r.survived}
+            for r in rebuttals if r.target_claim_id == c.claim_id
+        ]
+        summary.append({
+            "claim": c.claim_text,
+            "claim_type": c.claim_type,
+            "evidence": claim_evidence,
+            "fact_check_status": fact_check.status if fact_check else "not_checked",
+            "rebuttals_received": rebuttals_received,
+        })
+    return summary
 def generate_scores(
     transcript: Transcript,
     claims: List[Claim],
@@ -18,12 +41,12 @@ def generate_scores(
     speaker_a, speaker_b = speakers[0], speakers[1]
     
     # Summarize data for the prompt
-    data_summary = {
-        "claims_count": len(claims),
-        "evidence_count": len(evidence),
-        "fact_checks": [{"id": fc.claim_id, "status": fc.status} for fc in fact_checks],
-        "rebuttals_count": len(rebuttals)
-    }
+   data_summary = {
+    "claims_count": len(claims),
+    "evidence_count": len(evidence),
+    "fact_checks": [{"id": fc.claim_id, "status": fc.status} for fc in fact_checks],
+    "rebuttals_count": len(rebuttals)
+}
     
     prompt = f"""
     You are an objective analytical evaluator. Analyze the provided summary of claims, evidence, verification results, and responses between the two speakers.
