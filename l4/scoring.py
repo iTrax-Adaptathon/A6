@@ -1,31 +1,25 @@
 import json
-from typing import List
-from models.schemas import FinalEvaluation, Claim, Evidence, FactCheckResult, Rebuttal, Transcript
+from typing import List, Any, Dict
+from models.schemas import FinalEvaluation, SpeakerScore, Claim, Evidence, FactCheckResult, Rebuttal, Transcript
 from api.ollama_client import ask_ollama
-def build_speaker_summary(speaker, claims, evidence, fact_checks, rebuttals):
-    """
-    Gathers everything a given speaker said, with actual text content,
-    so the AI has real material to judge instead of just counts.
-    """
-    fact_checks_by_claim = {fc.claim_id: fc for fc in fact_checks}
-    speaker_claims = [c for c in claims if c.speaker == speaker]
 
-    summary = []
-    for c in speaker_claims:
-        claim_evidence = [e.evidence_text for e in evidence if e.claim_id == c.claim_id]
-        fact_check = fact_checks_by_claim.get(c.claim_id)
-        rebuttals_received = [
-            {"text": r.rebuttal_text, "type": r.type, "survived": r.survived}
-            for r in rebuttals if r.target_claim_id == c.claim_id
-        ]
-        summary.append({
-            "claim": c.claim_text,
-            "claim_type": c.claim_type,
-            "evidence": claim_evidence,
-            "fact_check_status": fact_check.status if fact_check else "not_checked",
-            "rebuttals_received": rebuttals_received,
-        })
-    return summary
+def safe_score(val: Any, default: int = 50) -> int:
+    try:
+        score = int(float(val))
+        return max(0, min(100, score))
+    except (ValueError, TypeError):
+        return default
+
+def build_speaker_score(data: Dict[str, Any]) -> SpeakerScore:
+    return SpeakerScore(
+        logical_consistency=safe_score(data.get("logical_consistency")),
+        evidence_quality=safe_score(data.get("evidence_quality")),
+        rebuttal_strength=safe_score(data.get("rebuttal_strength")),
+        relevance=safe_score(data.get("relevance")),
+        clarity=safe_score(data.get("clarity")),
+        overall=safe_score(data.get("overall")),
+    )
+
 def generate_scores(
     transcript: Transcript,
     claims: List[Claim],
@@ -33,75 +27,88 @@ def generate_scores(
     fact_checks: List[FactCheckResult],
     rebuttals: List[Rebuttal]
 ) -> FinalEvaluation:
-    
-    speakers = list(set([seg.speaker for seg in transcript.segments]))
+    """
+    Computes comparative debate evaluation scores across multiple argumentative dimensions.
+    """
+    # Extract unique speakers
+    speakers = list(dict.fromkeys([seg.speaker for seg in transcript.segments if seg.speaker]))
     if len(speakers) < 2:
-        speakers = ["Speaker A", "Speaker B"] # Default if only one or zero found
+        speakers = ["Speaker A", "Speaker B"]
         
     speaker_a, speaker_b = speakers[0], speakers[1]
     
-    # Summarize data for the prompt
-   data_summary = {
-    "claims_count": len(claims),
-    "evidence_count": len(evidence),
-    "fact_checks": [{"id": fc.claim_id, "status": fc.status} for fc in fact_checks],
-    "rebuttals_count": len(rebuttals)
-}
+    data_summary = {
+        "speaker_a": speaker_a,
+        "speaker_b": speaker_b,
+        "claims_count": len(claims),
+        "evidence_count": len(evidence),
+        "fact_checks": [{"id": fc.claim_id, "status": fc.status} for fc in fact_checks],
+        "rebuttals_count": len(rebuttals)
+    }
     
     prompt = f"""
-    You are an objective analytical evaluator. Analyze the provided summary of claims, evidence, verification results, and responses between the two speakers.
-    Generate integer evaluation scores (from 0 to 100) for each speaker across the evaluation dimensions.
-    The determination of the leading speaker must depend strictly on logic, evidence quality, and response strength.
+    You are an objective analytical debate adjudicator. Analyze the provided summary of claims, evidence, verification results, and responses.
+    Generate integer evaluation scores (from 0 to 100) for each speaker across the five dimensions.
     
     Speakers: {speaker_a} and {speaker_b}
     Analysis Summary: {json.dumps(data_summary)}
     
-    Return ONLY a JSON object conforming exactly to this structure:
+    Return ONLY a JSON object conforming strictly to this format:
     {{
       "speaker_a": {{
-        "logical_consistency": <integer between 0 and 100>,
-        "evidence_quality": <integer between 0 and 100>,
-        "rebuttal_strength": <integer between 0 and 100>,
-        "relevance": <integer between 0 and 100>,
-        "clarity": <integer between 0 and 100>,
-        "overall": <integer between 0 and 100>
+        "logical_consistency": 75,
+        "evidence_quality": 80,
+        "rebuttal_strength": 70,
+        "relevance": 85,
+        "clarity": 80,
+        "overall": 78
       }},
       "speaker_b": {{
-        "logical_consistency": <integer between 0 and 100>,
-        "evidence_quality": <integer between 0 and 100>,
-        "rebuttal_strength": <integer between 0 and 100>,
-        "relevance": <integer between 0 and 100>,
-        "clarity": <integer between 0 and 100>,
-        "overall": <integer between 0 and 100>
+        "logical_consistency": 70,
+        "evidence_quality": 65,
+        "rebuttal_strength": 75,
+        "relevance": 80,
+        "clarity": 75,
+        "overall": 73
       }},
-      "winner": "Name of the winning speaker",
-      "reason": "Brief explanation of the outcome based on the metrics"
+      "winner": "{speaker_a}",
+      "reason": "Detailed justification of the scoring outcome"
     }}
-    
-    Note: Substitute "speaker_a" and "speaker_b" keys with the actual speaker names: "{speaker_a}" and "{speaker_b}". 
-    Or you can keep keys as "speaker_a" and "speaker_b" but ensure the winner matches one of them.
     """
     
     response_text = ask_ollama(prompt, json_format=True)
+    
     try:
         data = json.loads(response_text)
         
-        # Mapping back keys if the model used actual names
-        s_a_key = "speaker_a" if "speaker_a" in data else speaker_a
-        s_b_key = "speaker_b" if "speaker_b" in data else speaker_b
-        
-        return FinalEvaluation(
-            speaker_a=data.get(s_a_key, {}),
-            speaker_b=data.get(s_b_key, {}),
-            winner=data.get("winner", "Tie"),
-            reason=data.get("reason", "Could not determine.")
+        # Look for speaker data under standard keys, speaker names, or lowercase names
+        s_a_raw = (
+            data.get("speaker_a")
+            or data.get(speaker_a)
+            or data.get(speaker_a.lower())
+            or {}
         )
-    except json.JSONDecodeError:
-        print(f"Failed to parse L4 Scoring JSON: {response_text}")
-        # Return mock data on failure to prevent total crash
+        s_b_raw = (
+            data.get("speaker_b")
+            or data.get(speaker_b)
+            or data.get(speaker_b.lower())
+            or {}
+        )
+        
+        winner = str(data.get("winner", "Tie")).strip()
+        reason = str(data.get("reason", "Analysis completed based on logical structure and verification.")).strip()
+
         return FinalEvaluation(
-            speaker_a={"logical_consistency": 0, "evidence_quality": 0, "rebuttal_strength": 0, "relevance": 0, "clarity": 0, "overall": 0},
-            speaker_b={"logical_consistency": 0, "evidence_quality": 0, "rebuttal_strength": 0, "relevance": 0, "clarity": 0, "overall": 0},
-            winner="Unknown",
-            reason="Analysis failed."
+            speaker_a=build_speaker_score(s_a_raw if isinstance(s_a_raw, dict) else {}),
+            speaker_b=build_speaker_score(s_b_raw if isinstance(s_b_raw, dict) else {}),
+            winner=winner,
+            reason=reason
+        )
+    except (json.JSONDecodeError, TypeError, KeyError) as e:
+        print(f"[Scoring Error] Failed to parse evaluation scores: {e}")
+        return FinalEvaluation(
+            speaker_a=SpeakerScore(),
+            speaker_b=SpeakerScore(),
+            winner="Tie",
+            reason="Failed to parse detailed AI scoring metrics."
         )
