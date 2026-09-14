@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Debate AI Analyzer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen py-10 px-4 sm:px-8">
+  <div class="max-w-6xl mx-auto space-y-8">
+    <header class="text-center space-y-2">
+      <h1 class="text-4xl font-black tracking-tight text-white">Debate AI Adjudicator</h1>
+      <p class="text-slate-400">Automated argument mining, verification, rebuttal tracking, and scoring.</p>
+    </header>
+
+    <!-- Input Section -->
+    <div class="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl space-y-4">
+      <label class="block text-sm font-semibold text-slate-300">Transcript Input (Speaker Name: Text)</label>
+      <textarea id="transcript" rows="6" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-4 text-sm font-mono text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Alice: Renewable energy provides a stable grid transition.&#10;Bob: But solar and wind intermittency requires natural gas peaker plants."></textarea>
+      
+      <div class="flex justify-between items-center">
+        <button id="sampleBtn" class="text-xs text-blue-400 hover:underline">Insert Sample Transcript</button>
+        <button id="analyzeBtn" class="bg-blue-600 hover:bg-blue-500 px-6 py-2.5 rounded-xl font-bold text-white shadow-lg transition flex items-center gap-2">
+          <span>Analyze Debate</span>
+          <div id="spinner" class="hidden w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+        </button>
+      </div>
+    </div>
+
+    <!-- Results Section -->
+    <div id="results" class="hidden space-y-8">
+      <!-- Winner Banner -->
+      <div id="winnerCard" class="bg-gradient-to-r from-blue-900/60 to-indigo-950 border border-blue-600/40 p-6 rounded-2xl shadow-xl space-y-2">
+        <span class="text-xs uppercase font-bold tracking-widest text-blue-400">Adjudication Outcome</span>
+        <h2 id="winnerName" class="text-3xl font-extrabold text-white"></h2>
+        <p id="winnerReason" class="text-slate-300 text-sm leading-relaxed"></p>
+      </div>
+
+      <!-- Score Breakdown -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div class="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow space-y-4">
+          <h3 class="text-xl font-bold text-blue-400">Speaker A</h3>
+          <div id="speakerAScores" class="space-y-3 font-mono text-xs"></div>
+        </div>
+        <div class="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow space-y-4">
+          <h3 class="text-xl font-bold text-indigo-400">Speaker B</h3>
+          <div id="speakerBScores" class="space-y-3 font-mono text-xs"></div>
+        </div>
+      </div>
+
+      <!-- Fact Checking Table -->
+      <div class="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow space-y-4">
+        <h3 class="text-lg font-bold text-white">Web Fact Verification</h3>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-sm text-slate-300">
+            <thead class="text-xs uppercase bg-slate-950 text-slate-400 border-b border-slate-700">
+              <tr>
+                <th class="p-3">Claim ID</th>
+                <th class="p-3">Status</th>
+                <th class="p-3">Source</th>
+                <th class="p-3">Reasoning</th>
+              </tr>
+            </thead>
+            <tbody id="factTableBody" class="divide-y divide-slate-700 font-mono text-xs"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const sample = `Alice: Global renewable installations surged by 50 percent last year according to the IEA.
+Bob: That is true, but base load demands still rely heavily on fossil fuels during peak evening hours.
+Alice: Battery storage costs have dropped significantly to cover those exact peaks.`;
+
+    document.getElementById("sampleBtn").onclick = () => document.getElementById("transcript").value = sample;
+
+    document.getElementById("analyzeBtn").onclick = async () => {
+      const text = document.getElementById("transcript").value.trim();
+      if (!text) return alert("Please enter transcript text.");
+
+      const spinner = document.getElementById("spinner");
+      const resultsDiv = document.getElementById("results");
+      spinner.classList.remove("hidden");
+      resultsDiv.classList.add("hidden");
+
+      try {
+        const res = await fetch("/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ transcript_text: text })
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+
+        // Populate Winner
+        document.getElementById("winnerName").innerText = "Winner: " + data.evaluation.winner;
+        document.getElementById("winnerReason").innerText = data.evaluation.reason;
+
+        // Render Metric Bars
+        const renderBars = (containerId, scores) => {
+          const container = document.getElementById(containerId);
+          container.innerHTML = Object.entries(scores).map(([k, v]) => `
+            <div>
+              <div class="flex justify-between mb-1 uppercase font-semibold text-slate-400"><span>${k.replace('_', ' ')}</span><span>${v}/100</span></div>
+              <div class="w-full bg-slate-950 rounded-full h-2">
+                <div class="bg-blue-500 h-2 rounded-full" style="width: ${v}%"></div>
+              </div>
+            </div>
+          `).join('');
+        };
+        renderBars("speakerAScores", data.evaluation.speaker_a);
+        renderBars("speakerBScores", data.evaluation.speaker_b);
+
+        // Render Fact Checks
+        const tbody = document.getElementById("factTableBody");
+        tbody.innerHTML = (data.fact_checks || []).map(fc => `
+          <tr>
+            <td class="p-3">${fc.claim_id.slice(0, 8)}...</td>
+            <td class="p-3"><span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+              fc.status === 'supported' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
+              fc.status === 'contradicted' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
+              'bg-amber-950 text-amber-400 border border-amber-800'
+            }">${fc.status}</span></td>
+            <td class="p-3">${fc.source_url ? `<a href="${fc.source_url}" target="_blank" class="text-blue-400 hover:underline">Link</a>` : 'None'}</td>
+            <td class="p-3 font-sans text-xs text-slate-400">${fc.reasoning}</td>
+          </tr>
+        `).join('') || '<tr><td colspan="4" class="p-3 text-center text-slate-500">No factual claims extracted for verification.</td></tr>';
+
+        resultsDiv.classList.remove("hidden");
+      } catch (err) {
+        alert("Pipeline Error: " + err.message);
+      } finally {
+        spinner.classList.add("hidden");
+      }
+    };
+  </script>
+</body>
+</html>
